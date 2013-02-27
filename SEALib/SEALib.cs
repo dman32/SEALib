@@ -319,15 +319,13 @@ namespace SEALib
     }
     public static class TCP
     {
-        public static class Client
-        {
-        }
-        public static class Server
-        {
             private struct SOCKET
             {
+                public string name;
                 public Socket socket;
-                public AsyncCallback onAccept;
+                public Action<string> onAccept;
+                public Action<string, byte[], int> onReceive;
+                public byte[] bytes;
             }
             private static Dictionary<string, SOCKET> dServerSockets =  new Dictionary<string,SOCKET>();
 
@@ -338,13 +336,41 @@ namespace SEALib
                 s.socket.Bind(new IPEndPoint(IPAddress.Any, port));
                 dServerSockets.Add(name, s);
             }
-            public static void startListening(String name, AsyncCallback onAccept, int numberOfClients)
+            public static void startListening(String name, Action<string> onAccept, Action<string, byte[], int> onReceive, int numberOfClients, int byteSize)
             {
                 SOCKET s = dServerSockets[name];
+                s.name = name;
                 s.onAccept = onAccept;
+                s.onReceive = onReceive;
+                s.bytes = new byte[byteSize];
                 s.socket.Listen(numberOfClients);
-                s.socket.BeginAccept(onAccept, s.socket);
+                s.socket.BeginAccept(new AsyncCallback(cbAccept), s);
             }
-        }
+            private static void cbAccept(IAsyncResult ar)
+            {
+                SOCKET s = (SOCKET)ar.AsyncState;
+                s.socket = s.socket.EndAccept(ar);
+                s.onAccept(s.name);
+                s.socket.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
+            }
+            private static void cbReceive(IAsyncResult ar)
+            {
+                try
+                {
+                    SOCKET s = (SOCKET)ar.AsyncState;
+                    int bytesRec = s.socket.EndReceive(ar);
+                    s.socket.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
+                    if (bytesRec > 0)
+                    {
+                        s.onReceive(s.name, s.bytes, bytesRec);
+                    }
+                    else
+                    {
+                        s.socket.Shutdown(SocketShutdown.Both);
+                        s.socket.Close();
+                    }
+                }
+                catch { }
+            }
     }
 }
