@@ -169,6 +169,7 @@ namespace SEALib
                 {
                     try
                     {
+                        dbCon.Open();
                         OleDbCommand dbcmd = new OleDbCommand(cmd, dbCon);
                         if (pc != null)
                             foreach (OleDbParameter p in pc)
@@ -176,6 +177,7 @@ namespace SEALib
                         OleDbDataReader dr = dbcmd.ExecuteReader();
                         DataTable dt = new DataTable();
                         dt.Load(dr);
+                        dbCon.Close();
                         return dt;
                     }
                     catch (Exception ex)
@@ -212,11 +214,14 @@ namespace SEALib
                 {
                     try
                     {
+                        dbCon.Open();
                         OleDbCommand dbcmd = new OleDbCommand(cmd, dbCon);
                         if (pc != null)
                             foreach (OleDbParameter p in pc)
                                 dbcmd.Parameters.Add(p);
-                        return dbcmd.ExecuteNonQuery();
+                        int rtn = dbcmd.ExecuteNonQuery();
+                        dbCon.Close();
+                        return rtn;
                     }
                     catch (Exception ex)
                     {
@@ -252,7 +257,7 @@ namespace SEALib
     public static class ErrorMessages
     {
         public static bool debug = false;
-        public enum Level { msg, alert, warning, critical, decision };
+        public enum Level { msg, warning, critical, decision };
         public static bool ThrowError(String msg, String title, Level level, Func<int> fBefore, Exception ex)
         {
             bool val = false;
@@ -262,9 +267,6 @@ namespace SEALib
             {
                 case Level.msg:
                     MessageBox.Show(msg, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    break;
-                case Level.alert:
-                    MessageBox.Show("Alert: " + msg, title, MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
                     break;
                 case Level.warning:
                     MessageBox.Show("Warning: " + msg, title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -284,7 +286,6 @@ namespace SEALib
         private static string loadedFile;
         private static bool errorEncountered = false;
         public static bool loggingEnabled = true;
-
         public static void Init(string filename)
         {
             try
@@ -319,58 +320,142 @@ namespace SEALib
     }
     public static class TCP
     {
-            private struct SOCKET
+        private struct SOCKET
+        {
+            public string name;
+            public Socket socket;
+            public IPAddress ipAddress;
+            public Action<string> onAccept, onConnect, onSend, onDisconnect;
+            public Action<string, byte[], int> onReceive;
+            public byte[] bytes;
+            private bool connected;
+            public int bytesRec, port;
+            public void accept()
             {
-                public string name;
-                public Socket socket;
-                public Action<string> onAccept;
-                public Action<string, byte[], int> onReceive;
-                public byte[] bytes;
+                connected = true;
+                onAccept(name);
             }
-            private static Dictionary<string, SOCKET> dServerSockets =  new Dictionary<string,SOCKET>();
-
-            public static void addSocket(String name, int port)
+            public void connect()
             {
-                SOCKET s = new SOCKET();
-                s.socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-                s.socket.Bind(new IPEndPoint(IPAddress.Any, port));
-                dServerSockets.Add(name, s);
+                connected = true;
+                onConnect(name);
             }
-            public static void startListening(String name, Action<string> onAccept, Action<string, byte[], int> onReceive, int numberOfClients, int byteSize)
+            public void disconnect()
             {
+                connected = false;
+                onDisconnect(name);
+            }
+            public void receive()
+            {
+                onReceive(name, bytes, bytesRec);
+            }
+            public void send()
+            {
+                onSend(name);
+            }
+            public bool isConnected()
+            {
+                return connected;
+            }
+        }
+        private static Dictionary<string, SOCKET> dServerSockets =  new Dictionary<string,SOCKET>();
+        public static bool isConnected(String name)
+        {
+            SOCKET s = dServerSockets[name];
+            return s.socket.Connected;
+        }
+        public static void addSocket(String name, IPAddress ipAddress, int port)
+        {
+            SOCKET s = new SOCKET();
+            s.name = name;
+            s.ipAddress = ipAddress;
+            s.port = port;
+            s.socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            dServerSockets.Add(name, s);
+        }
+        public static void startListening(String name, Action<string> onAccept, Action<string> onDisconnect, Action<string, byte[], int> onReceive, int byteSize)
+        {
+            
                 SOCKET s = dServerSockets[name];
                 s.name = name;
                 s.onAccept = onAccept;
+                s.onDisconnect = onDisconnect;
                 s.onReceive = onReceive;
                 s.bytes = new byte[byteSize];
-                s.socket.Listen(numberOfClients);
-                s.socket.BeginAccept(new AsyncCallback(cbAccept), s);
-            }
-            private static void cbAccept(IAsyncResult ar)
-            {
-                SOCKET s = (SOCKET)ar.AsyncState;
-                s.socket = s.socket.EndAccept(ar);
-                s.onAccept(s.name);
-                s.socket.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
-            }
-            private static void cbReceive(IAsyncResult ar)
-            {
                 try
                 {
-                    SOCKET s = (SOCKET)ar.AsyncState;
-                    int bytesRec = s.socket.EndReceive(ar);
-                    s.socket.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
-                    if (bytesRec > 0)
-                    {
-                        s.onReceive(s.name, s.bytes, bytesRec);
-                    }
-                    else
-                    {
-                        s.socket.Shutdown(SocketShutdown.Both);
-                        s.socket.Close();
-                    }
+                    if (!s.socket.IsBound)
+                        s.socket.Bind(new IPEndPoint(s.ipAddress, s.port));
+                    s.socket.Listen(1);
+                    s.socket.BeginAccept(new AsyncCallback(cbAccept), s);
                 }
                 catch { }
+        }
+        public static void startConnecting(String name, Action<string> onConnect, Action<string> onDisconnect, Action<string, byte[], int> onReceive, int byteSize)
+        {
+            SOCKET s = dServerSockets[name];
+            s.socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            s.name = name;
+            s.onConnect = onConnect;
+            s.onDisconnect = onDisconnect;
+            s.onReceive = onReceive;
+            s.bytes = new byte[byteSize];
+            s.socket.BeginConnect(new IPEndPoint(s.ipAddress, s.port), new AsyncCallback(cbConnect), s);
+            dServerSockets[name] = s;
+        }
+        public static void startSend(String name, Action<string> onSend, byte[] bytes)
+        {
+            SOCKET s = dServerSockets[name];
+            s.socket.NoDelay = true;
+            s.socket.DontFragment = true;
+            s.onSend = onSend;
+            s.socket.BeginSend(bytes, 0, bytes.Length, SocketFlags.None, new AsyncCallback(cbSend), s);
+        }
+        public static void disconnect(String name)
+        {
+            SOCKET s = dServerSockets[name];
+            s.socket.Close();
+            s.disconnect();
+        }
+        private static void cbSend(IAsyncResult ar)
+        {
+            SOCKET s = (SOCKET)ar.AsyncState;
+            s.socket.EndSend(ar);
+            new Thread(s.send).Start();
+        }
+        private static void cbAccept(IAsyncResult ar)
+        {
+            SOCKET s = (SOCKET)ar.AsyncState;
+            s.socket = s.socket.EndAccept(ar);
+            new Thread(s.accept).Start();
+            s.socket.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
+            dServerSockets[s.name] = s;
+        }
+        private static void cbConnect(IAsyncResult ar)
+        {
+            SOCKET s = (SOCKET)ar.AsyncState;
+            s.socket.EndConnect(ar);
+            new Thread(s.connect).Start();
+            s.socket.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
+        }
+        private static void cbReceive(IAsyncResult ar)
+        {
+            try
+            {
+                SOCKET s = (SOCKET)ar.AsyncState;
+                s.bytesRec = s.socket.EndReceive(ar);
+                if (s.bytesRec > 0)
+                {
+                    s.socket.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
+                    new Thread(s.receive).Start();
+                }
+                else
+                {
+                    s.socket.Close();
+                    new Thread(s.disconnect).Start();
+                }
             }
+            catch { }
+        }
     }
 }
