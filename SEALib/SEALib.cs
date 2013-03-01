@@ -328,22 +328,24 @@ namespace SEALib
             public Action<string> onAccept, onConnect, onSend, onDisconnect;
             public Action<string, byte[], int> onReceive;
             public byte[] bytes;
-            private bool connected;
+            public bool listening, listener;
             public int bytesRec, port;
             public void accept()
             {
-                connected = true;
                 onAccept(name);
             }
             public void connect()
             {
-                connected = true;
                 onConnect(name);
             }
             public void disconnect()
             {
-                connected = false;
-                onDisconnect(name);
+                //try
+                {
+                    onDisconnect(name);
+                }
+                //catch { }
+
             }
             public void receive()
             {
@@ -353,56 +355,81 @@ namespace SEALib
             {
                 onSend(name);
             }
-            public bool isConnected()
-            {
-                return connected;
-            }
         }
         private static Dictionary<string, SOCKET> dServerSockets =  new Dictionary<string,SOCKET>();
         public static bool isConnected(String name)
         {
-            SOCKET s = dServerSockets[name];
-            return s.socket.Connected;
+            try
+            {
+                SOCKET s = dServerSockets[name];
+                return s.socket.Connected;
+            }
+            catch { }
+            return false;
         }
-        public static void addSocket(String name, IPAddress ipAddress, int port)
+        public static bool isListening(String name)
+        {
+            SOCKET s = dServerSockets[name];
+            return s.listening;
+        }
+        public static void addServer(String name, int port, Action<string> onAccept, Action<string> onDisconnect, Action<string, byte[], int> onReceive, int byteSize)
         {
             SOCKET s = new SOCKET();
+            s.onAccept = onAccept;
+            s.onDisconnect = onDisconnect;
+            s.onReceive = onReceive;
+            s.bytes = new byte[byteSize];
             s.name = name;
-            s.ipAddress = ipAddress;
+            s.ipAddress = IPAddress.Any;
             s.port = port;
+            s.listening = false;
+            s.listener = true;
             s.socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            s.socket.Bind(new IPEndPoint(IPAddress.Any, port));
+            s.socket.LingerState = new LingerOption(false, 0);
+            s.socket.SendTimeout = 0;
+            s.socket.ReceiveTimeout = 0;
             dServerSockets.Add(name, s);
         }
-        public static void startListening(String name, Action<string> onAccept, Action<string> onDisconnect, Action<string, byte[], int> onReceive, int byteSize)
+        public static void addClient(String name, IPAddress ipAddress, int port, Action<string> onConnect, Action<string> onDisconnect, Action<string, byte[], int> onReceive, int byteSize)
         {
-            
-                SOCKET s = dServerSockets[name];
-                s.name = name;
-                s.onAccept = onAccept;
-                s.onDisconnect = onDisconnect;
-                s.onReceive = onReceive;
-                s.bytes = new byte[byteSize];
-                try
-                {
-                    if (!s.socket.IsBound)
-                        s.socket.Bind(new IPEndPoint(s.ipAddress, s.port));
-                    s.socket.Listen(1);
-                    s.socket.BeginAccept(new AsyncCallback(cbAccept), s);
-                }
-                catch { }
-        }
-        public static void startConnecting(String name, Action<string> onConnect, Action<string> onDisconnect, Action<string, byte[], int> onReceive, int byteSize)
-        {
-            SOCKET s = dServerSockets[name];
-            s.socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            s.name = name;
+            SOCKET s = new SOCKET();
             s.onConnect = onConnect;
             s.onDisconnect = onDisconnect;
             s.onReceive = onReceive;
             s.bytes = new byte[byteSize];
-            s.socket.BeginConnect(new IPEndPoint(s.ipAddress, s.port), new AsyncCallback(cbConnect), s);
-            dServerSockets[name] = s;
+            s.name = name;
+            s.ipAddress = ipAddress;
+            s.port = port;
+            s.listening = false;
+            s.listener = false;
+            dServerSockets.Add(name, s);
+
         }
+        public static void startListening(String name)
+        {
+            SOCKET s = dServerSockets[name];
+            if (!s.listening)
+            {
+                s.listening = true;
+                dServerSockets[name] = s;
+                s.socket.Listen(1);
+                s.socket.BeginAccept(new AsyncCallback(cbAccept), s);
+                s.socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Linger, false);
+                dServerSockets[name] = s;
+            }
+        }
+        public static void startConnecting(String name)
+        {
+            SOCKET s = dServerSockets[name];
+            s.socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            s.socket.DontFragment = true;
+            s.socket.NoDelay = true;
+            dServerSockets[name] = s;
+            s.socket.BeginConnect(new IPEndPoint(s.ipAddress, s.port), new AsyncCallback(cbConnect), s);
+        }
+
+
         public static void startSend(String name, Action<string> onSend, byte[] bytes)
         {
             SOCKET s = dServerSockets[name];
@@ -410,12 +437,25 @@ namespace SEALib
             s.socket.DontFragment = true;
             s.onSend = onSend;
             s.socket.BeginSend(bytes, 0, bytes.Length, SocketFlags.None, new AsyncCallback(cbSend), s);
+            dServerSockets[name] = s;
         }
         public static void disconnect(String name)
         {
             SOCKET s = dServerSockets[name];
-            s.socket.Close();
-            s.disconnect();
+            if (s.listener)
+            {
+                if (isConnected(name))
+                {
+                    //s.socket.Shutdown(SocketShutdown.Both);
+                    //s.socket.Disconnect(true);
+                }
+            }else
+                if (isConnected(name))
+                {
+                    s.socket.Shutdown(SocketShutdown.Both);
+                    s.socket.Close();
+                }
+            new Thread(s.disconnect).Start();
         }
         private static void cbSend(IAsyncResult ar)
         {
@@ -425,11 +465,16 @@ namespace SEALib
         }
         private static void cbAccept(IAsyncResult ar)
         {
-            SOCKET s = (SOCKET)ar.AsyncState;
-            s.socket = s.socket.EndAccept(ar);
-            new Thread(s.accept).Start();
-            s.socket.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
-            dServerSockets[s.name] = s;
+            try
+            {
+                SOCKET s = (SOCKET)ar.AsyncState;
+                s.socket = s.socket.EndAccept(ar);
+                s.listening = false;
+                new Thread(s.accept).Start();
+                dServerSockets[s.name] = s;
+                s.socket.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
+            }
+            catch { }
         }
         private static void cbConnect(IAsyncResult ar)
         {
@@ -440,9 +485,9 @@ namespace SEALib
         }
         private static void cbReceive(IAsyncResult ar)
         {
+            SOCKET s = (SOCKET)ar.AsyncState;
             try
             {
-                SOCKET s = (SOCKET)ar.AsyncState;
                 s.bytesRec = s.socket.EndReceive(ar);
                 if (s.bytesRec > 0)
                 {
@@ -451,11 +496,13 @@ namespace SEALib
                 }
                 else
                 {
-                    s.socket.Close();
-                    new Thread(s.disconnect).Start();
+                    disconnect(s.name);
                 }
+                //dServerSockets[s.name] = s;
             }
-            catch { }
+            catch
+            {
+            }
         }
     }
 }
