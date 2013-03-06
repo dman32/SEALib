@@ -452,10 +452,10 @@ namespace SEALib
                 s.client.NoDelay = true;
                 s.client.DontFragment = true;
                 s.onSend = onSend;
-                s.client.BeginSend(bytes, 0, bytes.Length, SocketFlags.None, new AsyncCallback(cbSend), s);
                 dServerSockets[name] = s;
+                s.client.BeginSend(bytes, 0, bytes.Length, SocketFlags.None, new AsyncCallback(cbSend), s);
             }
-            catch { }
+            catch {}
         }
         public static void disconnect(String name)
         {
@@ -479,16 +479,6 @@ namespace SEALib
         }
 
         //CALLBACKS
-        private static void cbSend(IAsyncResult ar)
-        {
-            try
-            {
-                SOCKET s = (SOCKET)ar.AsyncState;
-                s.client.EndSend(ar);
-                new Thread(s.send).Start();
-            }
-            catch { SOCKET s = (SOCKET)ar.AsyncState; disconnect(s.name); }
-        }
         private static void cbAccept(IAsyncResult ar)
         {
             SOCKET s = (SOCKET)ar.AsyncState;
@@ -509,6 +499,16 @@ namespace SEALib
                 s.client.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
             }
             catch { }
+        }
+        private static void cbSend(IAsyncResult ar)
+        {
+            try
+            {
+                SOCKET s = (SOCKET)ar.AsyncState;
+                s.client.EndSend(ar);
+                new Thread(s.send).Start();
+            }
+            catch { SOCKET s = (SOCKET)ar.AsyncState; disconnect(s.name); }
         }
         private static void cbReceive(IAsyncResult ar)
         {
