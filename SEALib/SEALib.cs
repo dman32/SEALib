@@ -320,211 +320,258 @@ namespace SEALib
     }
     public static class TCP
     {
-        private struct SOCKET
+        public class SOCKET
         {
-            public string name;
-            public Socket client, server;
-            public IPAddress ipAddress;
-            public Action<string> onAccept, onConnect, onSend, onDisconnect;
-            public Action<string, byte[], int> onReceive;
-            public byte[] bytes;
-            public bool listening;
-            public int bytesRec, port;
-            public void accept()
+            private Socket client, server;
+            private IPAddress ipAddress;
+            private Action onAccept, onConnect, onSend, onDisconnect;
+            private Action<byte[], int> onReceive;
+            private byte[] bytes;
+            public bool isListening = false, isConnecting = false, heartbeatEnabled = false;
+            public int bytesRec = 0, port = -1, missedHeartbeatsAllowed = -1, missedHeartbeats = 0, heartbeatTimeout = -1, bufferedSends = 0;
+            
+            private void taccept()
             {
                 if (onAccept != null)
-                    onAccept(name);
+                    onAccept();
             }
-            public void connect()
+            private void tconnect()
             {
                 if (onConnect != null)
-                    onConnect(name);
+                    onConnect();
+            }
+            private void tdisconnect()
+            {
+                if (onDisconnect != null)
+                    onDisconnect();
+            }
+            private void treceive()
+            {
+                if (onReceive != null)
+                    onReceive(bytes, bytesRec);
+            }
+            private void tsend()
+            {
+                if (onSend != null)
+                    onSend();
+            }
+
+            private System.Timers.Timer tmrDisconnect = new System.Timers.Timer();
+            private System.Timers.Timer tmrHeartbeat = new System.Timers.Timer();
+
+            public bool isConnected
+            {
+                get
+                {
+                    try { return client.Connected; }
+                    catch { return false; }
+                }
+            }
+            public void initServer(int port, Action onAccept, Action onDisconnect, Action<byte[], int> onReceive, int byteSize)
+            {
+                try
+                {
+                    this.onAccept = onAccept;
+                    this.onDisconnect = onDisconnect;
+                    this.onReceive = onReceive;
+                    bytes = new byte[byteSize];
+                    ipAddress = IPAddress.Any;
+                    this.port = port;
+                    tmrDisconnect.Elapsed += delegate { disconnect(); };
+                    tmrDisconnect.AutoReset = false;
+                }
+                catch { }
+            }
+            public void initClient(String ipAddress, int port, Action onConnect, Action onDisconnect, Action<byte[], int> onReceive, int byteSize)
+            {
+                try
+                {
+                    this.onConnect = onConnect;
+                    this.onDisconnect = onDisconnect;
+                    this.onReceive = onReceive;
+                    bytes = new byte[byteSize];
+                    this.ipAddress = IPAddress.Parse(ipAddress);
+                    this.port = port;
+                    tmrDisconnect.Elapsed += delegate { disconnect(); };
+                    tmrDisconnect.AutoReset = false;
+                }
+                catch { }
+            }
+            public void startListening(int timeout)
+            {
+                try
+                {
+                    if (!isListening)
+                    {
+                        isListening = true;
+                        server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                        server.LingerState.Enabled = false;
+                        server.Bind(new IPEndPoint(IPAddress.Any, this.port));
+                        server.Listen(1);
+                        server.BeginAccept(new AsyncCallback(cbAccept), null);
+                        if (timeout > 0)
+                        {
+                            tmrDisconnect.Stop();
+                            tmrDisconnect.Interval = timeout;
+                            tmrDisconnect.Start();
+                        }
+                    }
+                }
+                catch { }
+            }
+            public void startConnecting(int timeout)
+            {
+                try
+                {
+                    if (!this.isConnecting)
+                    {
+                        isConnecting = true;
+                        bufferedSends = 0;
+                        missedHeartbeats = 0;
+                        client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                        client.BeginConnect(new IPEndPoint(ipAddress, port), new AsyncCallback(cbConnect), null);
+                        if (timeout > 0)
+                        {
+                            tmrDisconnect.Stop();
+                            tmrDisconnect.Interval = timeout;
+                            tmrDisconnect.Start();
+                        }
+                    }
+                }
+                catch { }
+            }
+            public void startSend(Action onSend, byte[] bytes)
+            {
+                try
+                {
+                    if (isConnected)
+                    {
+                        bufferedSends++;
+                        client.NoDelay = true;
+                        client.DontFragment = true;
+                        this.onSend = onSend;
+                        client.BeginSend(bytes, 0, bytes.Length, SocketFlags.None, new AsyncCallback(cbSend), null);
+                    }
+                }
+                catch { }
+            }
+            public void enableHeartbeat(int missedHeartbeatsAllowed, int heartbeatTimeout)
+            {
+                try
+                {
+                    heartbeatEnabled = true;
+                    missedHeartbeats = 0;
+                    this.missedHeartbeatsAllowed = missedHeartbeatsAllowed;
+                    this.heartbeatTimeout = heartbeatTimeout;
+                    tmrHeartbeat.Interval = heartbeatTimeout;
+                    tmrHeartbeat.Elapsed += delegate { checkHeartbeat(); };
+                    if (isConnected)
+                        tmrHeartbeat.Start();
+                }
+                catch { }
+            }
+            public void disableHeartbeat()
+            {
+                try
+                {
+                    heartbeatEnabled = false;
+                    tmrHeartbeat.Stop();
+                }
+                catch { }
             }
             public void disconnect()
             {
-                if (onDisconnect != null)
-                    onDisconnect(name);
-            }
-            public void receive()
-            {
-                if (onReceive != null)
-                    onReceive(name, bytes, bytesRec);
-            }
-            public void send()
-            {
-                if (onSend != null)
-                    onSend(name);
-            }
-        }
-        private static Dictionary<string, SOCKET> dServerSockets =  new Dictionary<string,SOCKET>();
-
-        public static bool isConnected(String name)
-        {
-            try
-            {
-                SOCKET s = dServerSockets[name];
-                return s.client.Connected;
-            }
-            catch { }
-            return false;
-        }
-        public static bool isListening(String name)
-        {
-            try
-            {
-                SOCKET s = dServerSockets[name];
-                return s.listening;
-            }
-            catch {}
-            return false;
-        }
-
-        public static void addServer(String name, int port, Action<string> onAccept, Action<string> onDisconnect, Action<string, byte[], int> onReceive, int byteSize)
-        {
-            try
-            {
-                SOCKET s = new SOCKET();
-                s.name = name;
-                s.onAccept = onAccept;
-                s.onDisconnect = onDisconnect;
-                s.onReceive = onReceive;
-                s.bytes = new byte[byteSize];
-                s.ipAddress = IPAddress.Any;
-                s.port = port;
-                s.listening = false;
-                dServerSockets.Add(name, s);
-            }
-            catch { }
-        }
-        public static void addClient(String name, String ipAddress, int port, Action<string> onConnect, Action<string> onDisconnect, Action<string, byte[], int> onReceive, int byteSize)
-        {
-            try
-            {
-                SOCKET s = new SOCKET();
-                s.name = name;
-                s.onConnect = onConnect;
-                s.onDisconnect = onDisconnect;
-                s.onReceive = onReceive;
-                s.bytes = new byte[byteSize];
-                s.ipAddress = IPAddress.Parse(ipAddress);
-                s.port = port;
-                s.listening = false;
-                dServerSockets.Add(name, s);
-            }
-            catch { }
-        }
-
-        public static void startListening(String name)
-        {
-            try
-            {
-                SOCKET s = dServerSockets[name];
-                if (!s.listening)
+                if (heartbeatEnabled)
+                    tmrHeartbeat.Stop();
+                isListening = false;
+                isConnecting = false;
+                try
                 {
-                    s.server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-                    s.server.Bind(new IPEndPoint(IPAddress.Any, s.port));
-                    s.listening = true;
-                    dServerSockets[name] = s;
-                    s.server.Listen(1);
-                    s.server.BeginAccept(new AsyncCallback(cbAccept), s);
-                    s.server.ExclusiveAddressUse = true;
-                    dServerSockets[name] = s;
+                    if (client != null && client.Connected)
+                    {
+                        new Thread(tdisconnect).Start();
+                        client.Shutdown(SocketShutdown.Both);
+                        client.Close(0);
+                    }
+
+                }
+                catch { }
+                try
+                {
+                    if (server != null)
+                        server.Close(0);
+                }
+                catch { }
+            }
+
+            //CALLBACKS
+            private void cbAccept(IAsyncResult ar)
+            {
+                try
+                {
+                    isListening = false;
+                    tmrDisconnect.Stop();
+                    client = server.EndAccept(ar);
+                    server.Close(0);
+                    new Thread(taccept).Start();
+                    client.BeginReceive(bytes, 0, bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), null);
+                }
+                catch { }
+            }
+            private void cbConnect(IAsyncResult ar)
+            {
+                try
+                {
+                    client.EndConnect(ar);
+                    isConnecting = false;
+                    tmrDisconnect.Stop();
+                    new Thread(tconnect).Start();
+                    client.BeginReceive(bytes, 0, bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), null);
+                }
+                catch { }
+            }
+            private void cbSend(IAsyncResult ar)
+            {
+                try
+                {
+                    client.EndSend(ar);
+                    bufferedSends--;
+                    new Thread(tsend).Start();
+                }
+                catch { disconnect(); }
+            }
+            private void cbReceive(IAsyncResult ar)
+            {
+                try
+                {
+                    if (heartbeatEnabled)
+                    {
+                        missedHeartbeats = 0;
+                        tmrHeartbeat.Stop();
+                    }
+                    bytesRec = client.EndReceive(ar);
+                    if (bytesRec > 0)
+                    {
+                        if (isConnected)
+                            client.BeginReceive(bytes, 0,bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), null);
+                        new Thread(treceive).Start();
+                        if (heartbeatEnabled)
+                            tmrHeartbeat.Start();
+                    }
+                    else
+                       disconnect();
+                }
+                catch { disconnect(); }
+            }
+            private void checkHeartbeat()
+            {
+                if (isConnected)
+                {
+                    missedHeartbeats++;
+                    if (missedHeartbeats > missedHeartbeatsAllowed)
+                        disconnect();
                 }
             }
-            catch { }
-        }
-        public static void startConnecting(String name)
-        {
-            try
-            {
-                SOCKET s = dServerSockets[name];
-                s.client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-                dServerSockets[name] = s;
-                s.client.BeginConnect(new IPEndPoint(s.ipAddress, s.port), new AsyncCallback(cbConnect), s);
-            }
-            catch { }
-        }
-        public static void startSend(String name, Action<string> onSend, byte[] bytes)
-        {
-            try
-            {
-                SOCKET s = dServerSockets[name];
-                s.client.NoDelay = true;
-                s.client.DontFragment = true;
-                s.onSend = onSend;
-                dServerSockets[name] = s;
-                s.client.BeginSend(bytes, 0, bytes.Length, SocketFlags.None, new AsyncCallback(cbSend), s);
-            }
-            catch {}
-        }
-        public static void disconnect(String name)
-        {
-            try
-            {
-                SOCKET s = dServerSockets[name];
-                s.client.Shutdown(SocketShutdown.Both);
-                s.client.Disconnect(false);
-                s.client.Close();
-                new Thread(s.disconnect).Start();
-            }
-            catch { }
-            try
-            {
-                SOCKET s = dServerSockets[name];
-                s.server.Shutdown(SocketShutdown.Both);
-                s.server.Disconnect(false);
-                s.server.Close();
-            }
-            catch { }
-        }
-
-        //CALLBACKS
-        private static void cbAccept(IAsyncResult ar)
-        {
-            SOCKET s = (SOCKET)ar.AsyncState;
-            s.client = s.server.EndAccept(ar);
-            s.server.Close();
-            s.listening = false;
-            new Thread(s.accept).Start();
-            dServerSockets[s.name] = s;
-            s.client.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
-        }
-        private static void cbConnect(IAsyncResult ar)
-        {
-            try
-            {
-                SOCKET s = (SOCKET)ar.AsyncState;
-                s.client.EndConnect(ar);
-                new Thread(s.connect).Start();
-                s.client.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
-            }
-            catch { }
-        }
-        private static void cbSend(IAsyncResult ar)
-        {
-            try
-            {
-                SOCKET s = (SOCKET)ar.AsyncState;
-                s.client.EndSend(ar);
-                new Thread(s.send).Start();
-            }
-            catch { SOCKET s = (SOCKET)ar.AsyncState; disconnect(s.name); }
-        }
-        private static void cbReceive(IAsyncResult ar)
-        {
-            SOCKET s = (SOCKET)ar.AsyncState;
-            try
-            {
-                s.bytesRec = s.client.EndReceive(ar);
-                if (s.bytesRec > 0)
-                {
-                    s.client.BeginReceive(s.bytes, 0, s.bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), s);
-                    new Thread(s.receive).Start();
-                }
-                else
-                    disconnect(s.name);
-            }
-            catch { disconnect(s.name); }
         }
     }
 }
