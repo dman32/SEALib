@@ -324,11 +324,11 @@ namespace SEALib
         {
             private Socket client, server;
             private IPAddress ipAddress;
-            private Action onAccept, onConnect, onSend, onDisconnect;
+            private Action onAccept, onConnect, onSend, onDisconnect, onTimeout, onHeartbeatTimeout;
             private Action<byte[], int> onReceive;
             private byte[] bytes;
             public bool isListening = false, isConnecting = false, heartbeatEnabled = false;
-            public int bytesRec = 0, port = -1, missedHeartbeatsAllowed = -1, missedHeartbeats = 0, heartbeatTimeout = -1, bufferedSends = 0;
+            public int bytesRec = 0, port = -1, heartbeatTimeout = -1, bufferedSends = 0;
             
             private void taccept()
             {
@@ -355,6 +355,16 @@ namespace SEALib
                 if (onSend != null)
                     onSend();
             }
+            private void ttimeout()
+            {
+                if (onTimeout != null)
+                    onTimeout();
+            }
+            private void theartbeattimeout()
+            {
+                if (onHeartbeatTimeout != null)
+                    onHeartbeatTimeout();
+            }
 
             private System.Timers.Timer tmrDisconnect = new System.Timers.Timer();
             private System.Timers.Timer tmrHeartbeat = new System.Timers.Timer();
@@ -377,7 +387,7 @@ namespace SEALib
                     bytes = new byte[byteSize];
                     ipAddress = IPAddress.Any;
                     this.port = port;
-                    tmrDisconnect.Elapsed += delegate { disconnect(); };
+                    tmrDisconnect.Elapsed += delegate { timeoutDisconnect(); };
                     tmrDisconnect.AutoReset = false;
                 }
                 catch { }
@@ -392,17 +402,18 @@ namespace SEALib
                     bytes = new byte[byteSize];
                     this.ipAddress = IPAddress.Parse(ipAddress);
                     this.port = port;
-                    tmrDisconnect.Elapsed += delegate { disconnect(); };
+                    tmrDisconnect.Elapsed += delegate { timeoutDisconnect(); };
                     tmrDisconnect.AutoReset = false;
                 }
                 catch { }
             }
-            public void startListening(int timeout)
+            public void startListening(int timeout, Action onTimeout)
             {
                 try
                 {
                     if (!isListening)
                     {
+                        this.onTimeout = onTimeout;
                         isListening = true;
                         server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
                         server.LingerState.Enabled = false;
@@ -419,15 +430,15 @@ namespace SEALib
                 }
                 catch { }
             }
-            public void startConnecting(int timeout)
+            public void startConnecting(int timeout, Action onTimeout)
             {
                 try
                 {
                     if (!this.isConnecting)
                     {
+                        this.onTimeout = onTimeout;
                         isConnecting = true;
                         bufferedSends = 0;
-                        missedHeartbeats = 0;
                         client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
                         client.BeginConnect(new IPEndPoint(ipAddress, port), new AsyncCallback(cbConnect), null);
                         if (timeout > 0)
@@ -455,13 +466,12 @@ namespace SEALib
                 }
                 catch { }
             }
-            public void enableHeartbeat(int missedHeartbeatsAllowed, int heartbeatTimeout)
+            public void enableHeartbeat(int heartbeatTimeout, Action onHeartbeatTimeout)
             {
                 try
                 {
                     heartbeatEnabled = true;
-                    missedHeartbeats = 0;
-                    this.missedHeartbeatsAllowed = missedHeartbeatsAllowed;
+                    this.onHeartbeatTimeout = onHeartbeatTimeout;
                     this.heartbeatTimeout = heartbeatTimeout;
                     tmrHeartbeat.Interval = heartbeatTimeout;
                     tmrHeartbeat.Elapsed += delegate { checkHeartbeat(); };
@@ -545,21 +555,20 @@ namespace SEALib
                 try
                 {
                     if (heartbeatEnabled)
-                    {
-                        missedHeartbeats = 0;
                         tmrHeartbeat.Stop();
-                    }
                     bytesRec = client.EndReceive(ar);
                     if (bytesRec > 0)
                     {
                         if (isConnected)
-                            client.BeginReceive(bytes, 0,bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), null);
+                            client.BeginReceive(bytes, 0, bytes.Length, SocketFlags.None, new AsyncCallback(cbReceive), null);
                         new Thread(treceive).Start();
                         if (heartbeatEnabled)
                             tmrHeartbeat.Start();
                     }
                     else
-                       disconnect();
+                    {
+                        disconnect();
+                    }
                 }
                 catch { disconnect(); }
             }
@@ -567,10 +576,14 @@ namespace SEALib
             {
                 if (isConnected)
                 {
-                    missedHeartbeats++;
-                    if (missedHeartbeats > missedHeartbeatsAllowed)
-                        disconnect();
+                    disconnect();
+                    new Thread(theartbeattimeout).Start();
                 }
+            }
+            private void timeoutDisconnect()
+            {
+                disconnect();
+                new Thread(ttimeout).Start();
             }
         }
     }
