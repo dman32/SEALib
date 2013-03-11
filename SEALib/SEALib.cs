@@ -281,6 +281,13 @@ namespace SEALib
             return val;
         }
     }
+    public static class FileBackup
+    {
+        public static void copyDirectory(string directory)
+        {
+            //COPYING FILES & FOLDERS
+        }
+    }
     public static class Logging
     {
         private static string loadedFile;
@@ -301,14 +308,19 @@ namespace SEALib
                 errorEncountered = true;
             }
         }
-        public static void Write(string line)
+        public static void Write(string text, bool newline)
         {
             if (loggingEnabled && !errorEncountered)
             {
                 try
                 {
                     using (StreamWriter outfile = File.AppendText(loadedFile))
-                        outfile.WriteLine(DateTime.Now.ToString() + ": " + line);
+                    {
+                        if (newline)
+                            outfile.WriteLine(DateTime.Now.ToString() + ": " + text);
+                        else
+                            outfile.Write(text);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -387,7 +399,7 @@ namespace SEALib
                     bytes = new byte[byteSize];
                     ipAddress = IPAddress.Any;
                     this.port = port;
-                    tmrDisconnect.Elapsed += delegate { timeoutDisconnect(); };
+                    tmrDisconnect.Elapsed += delegate { timeoutServer(); };
                     tmrDisconnect.AutoReset = false;
                 }
                 catch { }
@@ -402,7 +414,7 @@ namespace SEALib
                     bytes = new byte[byteSize];
                     this.ipAddress = IPAddress.Parse(ipAddress);
                     this.port = port;
-                    tmrDisconnect.Elapsed += delegate { timeoutDisconnect(); };
+                    tmrDisconnect.Elapsed += delegate { timeoutClient(); };
                     tmrDisconnect.AutoReset = false;
                 }
                 catch { }
@@ -580,8 +592,23 @@ namespace SEALib
                     new Thread(theartbeattimeout).Start();
                 }
             }
-            private void timeoutDisconnect()
+            private void timeoutClient()
             {
+                try
+                {
+                    client.Close(0);
+                }
+                catch { }
+                disconnect();
+                new Thread(ttimeout).Start();
+            }
+            private void timeoutServer()
+            {
+                try
+                {
+                    server.Close(0);
+                }
+                catch { }
                 disconnect();
                 new Thread(ttimeout).Start();
             }
